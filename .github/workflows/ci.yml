@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]  # roda em todo PR aberto ou atualizado
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true  # cacheia o module cache entre runs — builds mais rápidos
+
+      # Sobe postgres e redis para os testes de integração rodarem de verdade.
+      - name: Start services
+        run: docker compose up -d postgres redis
+
+      - name: Wait for postgres
+        run: |
+          until docker compose exec postgres pg_isready -U user; do sleep 1; done
+
+      - name: Run migrations
+        run: |
+          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          migrate -path ./migrations -database $DATABASE_URL up
+        env:
+          DATABASE_URL: postgres://user:pass@localhost:5432/shortener?sslmode=disable
+
+      - name: Run tests
+        # -race: detecta race conditions (fundamental em código Go concorrente)
+        # -count=1: desativa o cache de testes — sempre roda do zero
+        run: go test ./... -v -race -count=1
+        env:
+          DATABASE_URL: postgres://user:pass@localhost:5432/shortener?sslmode=disable
+          REDIS_URL:    localhost:6379
+
+      - name: Build Docker image
+        # Usa o SHA do commit como tag: garante rastreabilidade exata entre código e imagem.
+        run: docker build -t url-shortener:${{ github.sha }} .

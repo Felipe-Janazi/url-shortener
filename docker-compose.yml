@@ -1,27 +1,43 @@
 services:
+
   api:
     build: .
     ports:
       - "8080:8080"
     environment:
+      # Mesmos nomes de variáveis que serão usados no ECS Task Definition.
+      # Assim o comportamento local é idêntico ao de produção.
       DATABASE_URL: postgres://user:pass@postgres:5432/shortener?sslmode=disable
-      REDIS_URL: redis:6379
-      PORT: "8080"
+      REDIS_URL:    redis:6379
+      PORT:         "8080"
+      BASE_URL:     http://localhost:8080
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy  # aguarda o healthcheck do postgres passar
+      redis:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: user
+      POSTGRES_USER:     user
       POSTGRES_PASSWORD: pass
-      POSTGRES_DB: shortener
+      POSTGRES_DB:       shortener
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql/data  # persiste os dados entre restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d shortener"]
+      interval: 5s
+      timeout:  3s
+      retries:  5
 
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout:  3s
+      retries:  5
 
 volumes:
-  pg_data:
+  pg_data: # volume nomeado gerenciado pelo Docker
