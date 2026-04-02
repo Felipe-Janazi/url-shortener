@@ -1,44 +1,43 @@
-name: Deploy
+# Variáveis configuráveis — podem ser sobrescritas na linha de comando.
+# Exemplo: make migrate DB_URL=postgres://outro-host/db
+DB_URL ?= postgres://user:pass@localhost:5432/shortener?sslmode=disable
+BINARY  = api
 
-on:
-  push:
-    branches: [main]  # dispara apenas no merge para a main
+# Sobe PostgreSQL e Redis em background, depois inicia a API com as env vars corretas.
+# Usar 'make run' é o jeito mais rápido de subir tudo localmente.
+.PHONY: run
+run:
+	docker compose up -d postgres redis
+	DATABASE_URL=$(DB_URL) REDIS_URL=localhost:6379 go run ./cmd/api
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # necessário para autenticação OIDC com a AWS
-      contents: read
+# Roda todos os testes com o race detector ativado.
+# -race detecta acessos concorrentes sem sincronização — fundamental em Go.
+# -count=1 desativa o cache de resultados — garante que os testes sempre executam.
+.PHONY: test
+test:
+	go test ./... -v -race -count=1
 
-    steps:
-      - uses: actions/checkout@v4
+# Aplica todas as migrations pendentes usando golang-migrate.
+# Instale com: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+.PHONY: migrate
+migrate:
+	migrate -path ./migrations -database "$(DB_URL)" up
 
-      # Autenticação via OIDC: sem AWS_ACCESS_KEY_ID salva no repositório.
-      # O GitHub prova sua identidade para a AWS via token temporário e assinado.
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+# Reverte a última migration aplicada.
+# Útil durante desenvolvimento quando você quer ajustar o schema.
+.PHONY: migrate-down
+migrate-down:
+	migrate -path ./migrations -database "$(DB_URL)" down 1
 
-      - name: Login to ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+# Compila o binário com as mesmas flags do Dockerfile.
+# Use isso para testar o build de produção localmente antes de fazer push.
+.PHONY: build
+build:
+	CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o $(BINARY) ./cmd/api
 
-      - name: Build and push to ECR
-        run: |
-          IMAGE=${{ steps.ecr-login.outputs.registry }}/url-shortener:${{ github.sha }}
-          docker build -t $IMAGE .
-          docker push $IMAGE
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-
-      - name: Update ECS service
-        run: |
-          # Força o ECS a puxar a nova imagem e fazer rolling update.
-          # O ECS cria novas tasks, valida o healthcheck e só derruba as antigas
-          # quando as novas estiverem respondendo — zero downtime.
-          aws ecs update-service \
-            --cluster url-shortener-cluster \
-            --service url-shortener-service \
-            --force-new-deployment
+# Remove o binário compilado e derruba todos os containers com seus volumes.
+# Use com cuidado: 'down -v' apaga os dados do PostgreSQL local.
+.PHONY: clean
+clean:
+	rm -f $(BINARY)
+	docker compose down -v
